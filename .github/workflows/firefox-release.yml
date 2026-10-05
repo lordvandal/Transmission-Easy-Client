@@ -1,0 +1,142 @@
+name: Firefox Release (unlisted, self-distributed)
+
+# Builds the Firefox add-on, has Mozilla sign it on the UNLISTED channel and
+# publishes the signed .xpi plus updates.json as a GitHub release. Firefox
+# polls updates.json through gecko.update_url (releases/latest/download/...),
+# so installed copies update themselves. See FIREFOX.md.
+#
+# Only 4-part tags (vX.Y.Z.N): the 4th part is FIREFOX_REVISION. Upstream's
+# 3-part tags are not Firefox releases.
+on:
+  push:
+    tags:
+      - 'v*.*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    env:
+      TAG: ${{ github.ref_name }}
+      GECKO_ID: transmission-easy-client@lordvandal
+
+    steps:
+      # Same pinned SHAs as ci.yml and release.yml
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Resolves package.json "engines.node"
+          node-version-file: package.json
+          cache: 'npm'
+
+      # Fail before installing anything: the transform has no dependencies, so
+      # the version the build WILL produce can be computed right away.
+      - name: Check the tag against the Firefox version
+        run: |
+          expected=$(node -p "
+            const t = require('./builder/transformManifest');
+            const rev = require('fs').readFileSync('FIREFOX_REVISION', 'utf8').trim();
+            t(require('./src/manifest.json'), 'firefox', { firefoxRevision: rev }).version
+          ")
+          if [ "${TAG#v}" != "$expected" ]; then
+            echo "::error::tag $TAG does not match the Firefox version $expected (src/manifest.json + FIREFOX_REVISION)"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build Firefox
+        run: npm run build:firefox
+
+      # The authoritative check: what is about to be signed
+      - name: Verify the tag matches the built manifest
+        run: |
+          version=$(node -p "require('./dist/firefox/src/manifest.json').version")
+          id=$(node -p "require('./dist/firefox/src/manifest.json').browser_specific_settings.gecko.id")
+          if [ "${TAG#v}" != "$version" ]; then
+            echo "::error::tag $TAG does not match the built manifest version $version"
+            exit 1
+          fi
+          if [ "$id" != "$GECKO_ID" ]; then
+            echo "::error::built gecko id $id is not the permanent id $GECKO_ID"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # webpack emits the extension into dist/firefox/src (dist/ itself holds
+      # no manifest.json). --self-hosted: update_url is only an error for
+      # add-ons listed on AMO.
+      - name: Lint with web-ext
+        run: npx --yes web-ext@latest lint --source-dir=dist/firefox/src --self-hosted
+
+      # Credentials come from repository secrets through the environment and
+      # are never written to disk.
+      - name: Sign with Mozilla (unlisted)
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          npx --yes web-ext@latest sign \
+            --source-dir=dist/firefox/src \
+            --channel=unlisted \
+            --api-key="$AMO_JWT_ISSUER" \
+            --api-secret="$AMO_JWT_SECRET" \
+            --artifacts-dir=web-ext-artifacts
+
+      - name: Collect the signed .xpi
+        run: |
+          shopt -s nullglob
+          files=(web-ext-artifacts/*.xpi)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one signed .xpi, found ${#files[@]}"
+            ls -la web-ext-artifacts || true
+            exit 1
+          fi
+          xpi="transmission-easy-client-firefox-$VERSION.xpi"
+          mv "${files[0]}" "$xpi"
+          echo "XPI=$xpi" >> "$GITHUB_ENV"
+
+      # Format: https://extensionworkshop.com/documentation/manage/updating-your-extension/
+      - name: Generate updates.json
+        env:
+          UPDATE_LINK: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.XPI }}
+        run: |
+          node -e "
+            const updates = {
+              addons: {
+                [process.env.GECKO_ID]: {
+                  updates: [
+                    { version: process.env.VERSION, update_link: process.env.UPDATE_LINK },
+                  ],
+                },
+              },
+            };
+            require('fs').writeFileSync('updates.json', JSON.stringify(updates, null, 2) + '\n');
+          "
+          cat updates.json
+
+      # Not a prerelease and marked latest, so releases/latest/download/updates.json
+      # (the manifest's update_url) resolves to this release
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" "$XPI" updates.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --latest \
+            --title "Transmission Easy Client for Firefox $VERSION" \
+            --notes "Signed Firefox add-on (self-distributed). Drag $XPI into Firefox to install; installed copies update automatically. See FIREFOX.md."
