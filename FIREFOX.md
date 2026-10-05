@@ -1,0 +1,119 @@
+# Transmission Easy Client for Firefox
+
+This fork publishes a Firefox build of the extension that Mozilla signs as an
+**unlisted** (self-distributed) add-on. It is not on addons.mozilla.org. It is
+installed from this repository's GitHub Releases and updates itself from there.
+
+Credits: originally written by **Feverqwe**, maintained by **mthcore**
+(upstream: <https://github.com/mthcore/Transmission-Easy-Client>).
+
+## Install
+
+1. Open the [latest release](https://github.com/lordvandal/Transmission-Easy-Client/releases/latest).
+2. Download `transmission-easy-client-firefox-X.Y.Z.N.xpi`.
+3. Drag the file onto a Firefox window (or open `about:addons` → gear icon →
+   *Install Add-on From File…*) and confirm.
+
+The file is signed by Mozilla, so the install is permanent (unlike
+*Load Temporary Add-on* in `about:debugging`). Requires Firefox 140 or newer.
+
+## Automatic updates
+
+The Firefox manifest declares:
+
+```
+browser_specific_settings.gecko.update_url =
+  https://github.com/lordvandal/Transmission-Easy-Client/releases/latest/download/updates.json
+```
+
+Every release attaches an `updates.json` like this:
+
+```json
+{
+  "addons": {
+    "transmission-easy-client@lordvandal": {
+      "updates": [
+        { "version": "3.5.0.1", "update_link": "https://github.com/lordvandal/Transmission-Easy-Client/releases/download/v3.5.0.1/transmission-easy-client-firefox-3.5.0.1.xpi" }
+      ]
+    }
+  }
+}
+```
+
+Firefox checks `update_url` about once a day (or right away with *Check for
+Updates* in `about:addons`). `releases/latest/` always points at the newest
+non-prerelease release, so when its version is higher than the installed one,
+Firefox downloads the signed `.xpi` from `update_link` and installs it.
+
+## The add-on id must never change
+
+`transmission-easy-client@lordvandal` (in `builder/transformManifest.js`) is
+how Firefox and Mozilla identify this add-on. Signing and updates are tied to
+it. If it changes, Firefox treats the result as a different add-on and existing
+installs never update to it. Do not change it.
+
+## Versioning
+
+AMO accepts only numeric versions with at most 4 parts. The Firefox version is:
+
+```
+<upstream version from src/manifest.json>.<FIREFOX_REVISION>
+```
+
+for example `3.5.0` + `1` → `3.5.0.1`. `FIREFOX_REVISION` (a file at the
+repository root) is the only place the 4th part lives. Chrome and Opera builds
+keep the plain upstream version.
+
+Each signed version can be uploaded to Mozilla only once, so every release
+needs a new version.
+
+## Cut a release
+
+1. Bump the 4th part: edit `FIREFOX_REVISION` (e.g. `1` → `2`).
+2. Commit and push to `develop`.
+3. Tag and push the tag:
+
+   ```sh
+   git tag v3.5.0.2
+   git push origin v3.5.0.2
+   ```
+
+The **Firefox Release** workflow (`.github/workflows/firefox-release.yml`)
+then:
+
+- fails early if the tag (without `v`) is not the version the Firefox build produces
+- runs `npm ci`, type-check, tests, `build:firefox` and `web-ext lint`
+- signs the build on the unlisted channel with the `AMO_JWT_ISSUER` /
+  `AMO_JWT_SECRET` repository secrets
+- creates the GitHub release with the signed `.xpi` and `updates.json`
+
+If the workflow fails **after** signing succeeded, Mozilla already has that
+version. Bump `FIREFOX_REVISION` again and push a new tag instead of re-running.
+
+To check the build locally:
+
+```sh
+npm ci
+npm run build:firefox
+npx web-ext@latest lint --source-dir=dist/firefox/src --self-hosted
+```
+
+The built extension is in `dist/firefox/src` (not `dist`).
+
+## Sync with upstream
+
+```sh
+git remote add upstream https://github.com/mthcore/Transmission-Easy-Client.git   # once
+git fetch upstream
+git merge upstream/develop
+```
+
+If the merge changed the upstream version in `src/manifest.json` (e.g.
+`3.5.0` → `3.6.0`), reset `FIREFOX_REVISION` to `1` so the next release is
+`v3.6.0.1`. If the upstream version did not change, bump `FIREFOX_REVISION`
+as usual.
+
+Note: upstream's own `release.yml` also runs on `v*` tags. On this fork it fails
+at its "tag matches the manifest version" check for 4-part tags and publishes
+nothing (its store deploy jobs are disabled unless the `DEPLOY_*` variables are
+set). Only the **Firefox Release** run matters here.
