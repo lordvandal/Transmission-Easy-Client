@@ -186,7 +186,9 @@ const config = {
           // can be unit-tested: it decides whether the add-on installs at all,
           // and the test suite cannot otherwise see this code path.
           transform: (content) =>
-            JSON.stringify(transformManifest(JSON.parse(content), browser), null, 4)
+            JSON.stringify(transformManifest(JSON.parse(content), browser, {
+              firefoxRevision: BUILD_ENV.firefoxRevision,
+            }), null, 4)
         },
         {from: './src/assets/icons', to: './assets/icons'},
         {from: './src/assets/img/notification_*.png', to: './assets/img/[name][ext]'},

@@ -24,6 +24,8 @@ const compressSource = () => {
       {from: path.join(__dirname, '../eslint.config.js'), to: 'eslint.config.js'},
       {from: path.join(__dirname, '../.prettierrc'), to: '.prettierrc'},
       {from: path.join(__dirname, '../LICENSE'), to: 'LICENSE'},
+      // Read by defaultBuildEnv.js: the 4th version part of the Firefox build
+      {from: path.join(__dirname, '../FIREFOX_REVISION'), to: 'FIREFOX_REVISION'},
     ]
   }, path.join(outputPath, `${BUILD_ENV.distName}-source.${ext}`));
 };
