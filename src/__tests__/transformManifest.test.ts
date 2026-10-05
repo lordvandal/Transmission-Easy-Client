@@ -7,7 +7,7 @@ import path from 'node:path';
 const transformManifest = require('../../builder/transformManifest') as (
   manifest: Record<string, unknown>,
   browser: string,
-  env?: Record<string, string | undefined>
+  options?: { firefoxRevision?: string | number }
 ) => Record<string, unknown>;
 
 /**
@@ -30,25 +30,26 @@ type Gecko = {
     id: string;
     strict_min_version: string;
     data_collection_permissions: { required: string[] };
+    update_url: string;
   };
   gecko_android: { strict_min_version: string };
 };
 
 describe('transformManifest — Chrome and Opera', () => {
   it.each(['chrome', 'opera'])('ships src/manifest.json verbatim for %s', (browser) => {
-    expect(transformManifest(SOURCE, browser, {})).toEqual(SOURCE);
+    expect(transformManifest(SOURCE, browser, { firefoxRevision: 1 })).toEqual(SOURCE);
   });
 
   it('keeps minimum_chrome_version, which gates the MAIN-world capture', () => {
     // chrome.scripting world:'MAIN' needs Chrome 111; dropping this floor would
     // let the extension install where the capture silently cannot work.
-    const out = transformManifest(SOURCE, 'chrome', {});
+    const out = transformManifest(SOURCE, 'chrome', { firefoxRevision: 1 });
     expect(out.minimum_chrome_version).toBe(SOURCE.minimum_chrome_version);
   });
 });
 
 describe('transformManifest — Firefox', () => {
-  const firefox = () => transformManifest(SOURCE, 'firefox', {});
+  const firefox = () => transformManifest(SOURCE, 'firefox', { firefoxRevision: 1 });
 
   it('replaces the service worker with a classic background script', () => {
     // Firefox has no extension service workers: an MV3 add-on declaring only
@@ -65,16 +66,47 @@ describe('transformManifest — Firefox', () => {
     expect(firefox()).not.toHaveProperty('minimum_chrome_version');
   });
 
-  it('sets a gecko id — a missing one is a hard ADDON_ID_REQUIRED error on AMO', () => {
+  it('sets the permanent gecko id — a missing one is a hard ADDON_ID_REQUIRED error', () => {
+    // Signing and auto-update are tied to this id: changing it would make a new
+    // add-on that existing installs never update to.
     const bss = firefox().browser_specific_settings as Gecko;
-    expect(bss.gecko.id).toBe('transmission-easy-client@mthcore');
+    expect(bss.gecko.id).toBe('transmission-easy-client@lordvandal');
   });
 
-  it('takes the id from FIREFOX_ADDON_ID, which must equal the AMO listing GUID', () => {
-    // The release workflow passes the same secret as FIREFOX_ADDON_GUID to the
-    // upload step; a mismatch fails validation after the tag already exists.
-    const out = transformManifest(SOURCE, 'firefox', { FIREFOX_ADDON_ID: 'real@guid' });
-    expect((out.browser_specific_settings as Gecko).gecko.id).toBe('real@guid');
+  it('points auto-update at the updates.json of the latest GitHub release', () => {
+    const bss = firefox().browser_specific_settings as Gecko;
+    expect(bss.gecko.update_url).toBe(
+      'https://github.com/lordvandal/Transmission-Easy-Client/releases/latest/download/updates.json'
+    );
+  });
+
+  it('appends the packaging revision as the 4th version part', () => {
+    expect(firefox().version).toBe(`${SOURCE.version}.1`);
+    expect(transformManifest(SOURCE, 'firefox', { firefoxRevision: '12' }).version).toBe(
+      `${SOURCE.version}.12`
+    );
+  });
+
+  it.each([undefined, '', '0', '01', '1.2', 'x', -1])(
+    'rejects an invalid packaging revision (%s)',
+    (firefoxRevision) => {
+      expect(() =>
+        transformManifest(SOURCE, 'firefox', {
+          firefoxRevision: firefoxRevision as string | number | undefined,
+        })
+      ).toThrow(/packaging revision/);
+    }
+  );
+
+  it('produces a version AMO accepts: at most 4 numeric parts', () => {
+    expect(firefox().version).toMatch(/^\d+(\.\d+){0,3}$/);
+  });
+
+  it('brands the name and credits the original author and fork maintainer', () => {
+    const out = firefox();
+    expect(out.name).toBe('Transmission Easy Client for Firefox');
+    expect(out.description).toMatch(/Feverqwe/);
+    expect(out.description).toMatch(/mthcore/);
   });
 
   it('declares the version floors AMO needs for host permissions and consent data', () => {
@@ -102,7 +134,15 @@ describe('transformManifest — Firefox', () => {
   it('changes nothing else', () => {
     const out = firefox();
     const untouched = Object.keys(SOURCE).filter(
-      (key) => !['background', 'permissions', 'minimum_chrome_version'].includes(key)
+      (key) =>
+        ![
+          'background',
+          'permissions',
+          'minimum_chrome_version',
+          'version',
+          'name',
+          'description',
+        ].includes(key)
     );
     for (const key of untouched) {
       expect(out[key], `${key} was modified`).toEqual(SOURCE[key]);
@@ -116,17 +156,18 @@ describe('transformManifest — purity', () => {
     // Firefox rewrite into a subsequent Chrome build in the same process.
     const input = JSON.parse(JSON.stringify(SOURCE));
     const before = JSON.stringify(input);
-    transformManifest(input, 'firefox', {});
+    transformManifest(input, 'firefox', { firefoxRevision: 1 });
     expect(JSON.stringify(input)).toBe(before);
   });
 
-  it('does not read process.env when an env is supplied', () => {
+  it('does not read FIREFOX_ADDON_ID from process.env — the id is permanent', () => {
+    // Upstream's release.yml sets FIREFOX_ADDON_ID; it must not change this id.
     const previous = process.env.FIREFOX_ADDON_ID;
     process.env.FIREFOX_ADDON_ID = 'from-process-env';
     try {
-      const out = transformManifest(SOURCE, 'firefox', {});
+      const out = transformManifest(SOURCE, 'firefox', { firefoxRevision: 1 });
       expect((out.browser_specific_settings as Gecko).gecko.id).toBe(
-        'transmission-easy-client@mthcore'
+        'transmission-easy-client@lordvandal'
       );
     } finally {
       if (previous === undefined) delete process.env.FIREFOX_ADDON_ID;
@@ -143,5 +184,10 @@ describe('transformManifest — the manifest it is fed', () => {
     expect(SOURCE.background).toHaveProperty('service_worker');
     expect(Array.isArray(SOURCE.permissions)).toBe(true);
     expect(SOURCE.manifest_version).toBe(3);
+  });
+
+  it('FIREFOX_REVISION holds a revision the transform accepts', () => {
+    const revision = fs.readFileSync(path.join(__dirname, '../../FIREFOX_REVISION'), 'utf8').trim();
+    expect(() => transformManifest(SOURCE, 'firefox', { firefoxRevision: revision })).not.toThrow();
   });
 });

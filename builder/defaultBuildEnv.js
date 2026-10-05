@@ -1,9 +1,17 @@
 const getArgvValue = require('./getArgvValue');
+const fs = require('fs');
 const path = require('path');
 
 const mode = getArgvValue('--mode') || 'development';
 
 const version = require('../src/manifest').version;
+
+// 4th version part of the Firefox build only (AMO allows at most 4 numeric
+// parts; upstream owns the first three). Single source: the FIREFOX_REVISION
+// file at the repo root. Chrome and Opera keep src/manifest.json's version.
+const firefoxRevision = fs
+  .readFileSync(path.join(__dirname, '../FIREFOX_REVISION'), 'utf8')
+  .trim();
 
 const browser = process.env.BROWSER || getArgvValue('--BROWSER') || 'chrome';
 
@@ -22,6 +30,7 @@ global.BUILD_ENV = {
   devtool: mode === 'development' ? 'inline-source-map' : false,
   version,
   browser,
+  firefoxRevision,
   babelEnvOptions,
   FLAG_ENABLE_LOGGER: mode !== 'production',
 };

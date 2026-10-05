@@ -9,16 +9,38 @@
  * a defect here is structurally invisible to it — unless the logic is a plain
  * function, which is what this file is for.
  *
- * Pure by contract: no I/O, no webpack, no mutation of its input. `env` is
- * passed in rather than read from `process.env` so the tests do not have to
- * mutate global state.
+ * Pure by contract: no I/O, no webpack, no mutation of its input. The Firefox
+ * packaging revision is passed in (builder/defaultBuildEnv.js reads it from
+ * the FIREFOX_REVISION file) so the tests do not have to touch the disk.
  *
  * @param {object} manifest  parsed src/manifest.json (not mutated)
  * @param {string} browser   'chrome' | 'firefox' | 'opera'
- * @param {object} [env]     defaults to process.env
+ * @param {object} [options]
+ * @param {string|number} [options.firefoxRevision]  4th version part of the
+ *   Firefox build; required when browser is 'firefox'
  * @returns {object} the manifest to emit
  */
-function transformManifest(manifest, browser, env = process.env) {
+const GECKO_ID = 'transmission-easy-client@lordvandal';
+const UPDATE_URL =
+  'https://github.com/lordvandal/Transmission-Easy-Client/releases/latest/download/updates.json';
+const FIREFOX_NAME = 'Transmission Easy Client for Firefox';
+const FIREFOX_DESCRIPTION =
+  'Extension add Transmission web GUI in your web browser. ' +
+  'Original author: Feverqwe. Fork maintainer: mthcore.';
+
+/** AMO version parts are integers without leading zeros, at most 9 digits. */
+function firefoxRevision(value) {
+  const revision = String(value ?? '').trim();
+  if (!/^[1-9]\d{0,8}$/.test(revision)) {
+    throw new Error(
+      `Invalid Firefox packaging revision ${JSON.stringify(value)}: ` +
+        'expected a positive integer without leading zeros (see FIREFOX_REVISION)'
+    );
+  }
+  return revision;
+}
+
+function transformManifest(manifest, browser, options = {}) {
   if (browser !== 'firefox') {
     // Chrome and Opera ship src/manifest.json verbatim.
     return manifest;
@@ -37,15 +59,22 @@ function transformManifest(manifest, browser, env = process.env) {
     scripts: [manifest.background.service_worker],
   };
 
-  // addons-linter makes a missing id a hard ERROR on MV3 (ADDON_ID_REQUIRED),
-  // so AMO rejects the upload at validation. It MUST equal the GUID of the
-  // existing AMO listing, which the release workflow also passes as
-  // FIREFOX_ADDON_GUID — set that same value in FIREFOX_ADDON_ID for release
-  // builds; the default below only keeps local builds lintable.
-  const addonId = env.FIREFOX_ADDON_ID || 'transmission-easy-client@mthcore';
+  // AMO accepts at most 4 numeric parts. Upstream owns the first three; the
+  // 4th is this fork's packaging revision, so Firefox can be re-released
+  // without waiting for an upstream version bump.
+  result.version = `${manifest.version}.${firefoxRevision(options.firefoxRevision)}`;
+
+  // Branding of the self-distributed build. Literal strings, not __MSG_ keys:
+  // the localized appName/appDesc are shared with the Chrome and Opera builds.
+  result.name = FIREFOX_NAME;
+  result.description = FIREFOX_DESCRIPTION;
+
   result.browser_specific_settings = {
     gecko: {
-      id: addonId,
+      // Hard-coded on purpose: Firefox identifies the installed add-on by this
+      // id, and both signing and auto-update are tied to it. Changing it makes
+      // a NEW add-on that existing installs never update to.
+      id: GECKO_ID,
       // 140 is the first release where BOTH pieces work: host permissions
       // granted at install (127+) and the data collection metadata below
       // (140+). Declaring 127 made addons-linter warn that the consent data
@@ -55,6 +84,9 @@ function transformManifest(manifest, browser, env = process.env) {
       data_collection_permissions: {
         required: ['none'],
       },
+      // Self-distributed (unlisted) build: Firefox polls this file for updates.
+      // It is attached to every GitHub release by firefox-release.yml.
+      update_url: UPDATE_URL,
     },
     // Android got data_collection_permissions two releases later
     gecko_android: {
@@ -70,3 +102,5 @@ function transformManifest(manifest, browser, env = process.env) {
 }
 
 module.exports = transformManifest;
+module.exports.GECKO_ID = GECKO_ID;
+module.exports.UPDATE_URL = UPDATE_URL;
