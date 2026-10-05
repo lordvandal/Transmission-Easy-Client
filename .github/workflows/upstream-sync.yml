@@ -1,0 +1,107 @@
+name: Upstream Sync
+
+# Merges mthcore/Transmission-Easy-Client develop into this fork's develop,
+# sets the Firefox version, checks the result and starts a Firefox release.
+# See FIREFOX.md.
+#
+# Version rule: if upstream's version (src/manifest.json) changed, the 4th part
+# (FIREFOX_REVISION) goes back to 1. Otherwise it goes up by 1, but only when
+# the merge changed something that ends up in the add-on.
+#
+# Pushing uses the SYNC_TOKEN secret when it is set. The built-in token cannot
+# push a merge that touches .github/workflows/, which upstream does now and then.
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/mthcore/Transmission-Easy-Client.git
+          git fetch --no-tags upstream develop
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Merge upstream/develop
+        id: merge
+        run: |
+          if git merge-base --is-ancestor upstream/develop HEAD; then
+            echo "Already up to date with upstream."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before=$(git rev-parse HEAD)
+          old_version=$(node -p "require('./src/manifest.json').version")
+          if ! git merge --no-ff --no-edit upstream/develop; then
+            echo "::error::Upstream changes conflict with this fork's changes in:"
+            git diff --name-only --diff-filter=U | sed 's/^/  /'
+            echo "::error::Nothing was pushed. Resolve the merge by hand (see FIREFOX.md)."
+            exit 1
+          fi
+          new_version=$(node -p "require('./src/manifest.json').version")
+          revision=$(tr -d '[:space:]' < FIREFOX_REVISION)
+          if [ "$new_version" != "$old_version" ]; then
+            echo "Upstream version $old_version -> $new_version: FIREFOX_REVISION reset to 1"
+            echo 1 > FIREFOX_REVISION
+            release=true
+          elif git diff --quiet "$before" HEAD -- src builder package.json package-lock.json webpack.config.js tsconfig.json; then
+            echo "Upstream changes do not touch the add-on: no new release"
+            release=false
+          else
+            echo "Add-on changed, same upstream version: FIREFOX_REVISION $revision -> $((revision + 1))"
+            echo $((revision + 1)) > FIREFOX_REVISION
+            release=true
+          fi
+          if ! git diff --quiet FIREFOX_REVISION; then
+            git commit -m "Firefox: set FIREFOX_REVISION to $(cat FIREFOX_REVISION) after upstream sync" FIREFOX_REVISION
+          fi
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+      # Nothing reaches develop unless it passes the same checks as a release
+      - name: Setup Node.js
+        if: steps.merge.outputs.merged == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: package.json
+          cache: 'npm'
+
+      - name: Check the merged code
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          npm ci
+          npm run type-check
+          npm test
+          npm run build:firefox
+          npx --yes web-ext@latest lint --source-dir=dist/firefox/src --self-hosted
+
+      - name: Push to develop
+        if: steps.merge.outputs.merged == 'true'
+        run: git push origin HEAD:develop
+
+      # Uses workflow_dispatch, which the built-in token is allowed to start
+      - name: Start the Firefox release
+        if: steps.merge.outputs.release == 'true' && vars.AUTO_RELEASE != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run firefox-release.yml --repo "$GITHUB_REPOSITORY" --ref develop
