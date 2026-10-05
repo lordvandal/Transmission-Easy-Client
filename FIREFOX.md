@@ -69,26 +69,40 @@ needs a new version.
 
 ## Cut a release
 
-1. Bump the 4th part: edit `FIREFOX_REVISION` (e.g. `1` → `2`).
-2. Commit and push to `develop`.
-3. Tag and push the tag:
+### From the GitHub website (no git needed)
 
-   ```sh
-   git tag v3.5.0.2
-   git push origin v3.5.0.2
-   ```
+1. Bump the 4th part (skip this for the very first release, `3.5.0.1`):
+   open `FIREFOX_REVISION` on GitHub, click the pencil icon, change the number
+   (e.g. `1` → `2`) and commit it to `develop`.
+2. Go to **Actions** → **Firefox Release** → **Run workflow**, leave the branch
+   on `develop`, and click the green **Run workflow** button.
 
-The **Firefox Release** workflow (`.github/workflows/firefox-release.yml`)
-then:
+The workflow works out the version (e.g. `3.5.0.2`) and creates the tag
+`v3.5.0.2` together with the release. Do **not** use *Draft a new release*:
+the workflow creates the release itself and would fail if one already exists.
 
-- fails early if the tag (without `v`) is not the version the Firefox build produces
+### With git
+
+Bump `FIREFOX_REVISION`, commit and push to `develop`, then:
+
+```sh
+git tag v3.5.0.2
+git push origin v3.5.0.2
+```
+
+### What the workflow does
+
+`.github/workflows/firefox-release.yml`:
+
+- fails early if the version was already released, or if a pushed tag (without
+  `v`) is not the version the Firefox build produces
 - runs `npm ci`, type-check, tests, `build:firefox` and `web-ext lint`
 - signs the build on the unlisted channel with the `AMO_JWT_ISSUER` /
   `AMO_JWT_SECRET` repository secrets
 - creates the GitHub release with the signed `.xpi` and `updates.json`
 
 If the workflow fails **after** signing succeeded, Mozilla already has that
-version. Bump `FIREFOX_REVISION` again and push a new tag instead of re-running.
+version. Bump `FIREFOX_REVISION` again and release again instead of re-running.
 
 To check the build locally:
 
@@ -102,6 +116,11 @@ The built extension is in `dist/firefox/src` (not `dist`).
 
 ## Sync with upstream
 
+From the website: on the repository's main page (branch `develop`), click
+**Sync fork** → **Update branch**.
+
+With git:
+
 ```sh
 git remote add upstream https://github.com/mthcore/Transmission-Easy-Client.git   # once
 git fetch upstream
@@ -113,7 +132,8 @@ If the merge changed the upstream version in `src/manifest.json` (e.g.
 `v3.6.0.1`. If the upstream version did not change, bump `FIREFOX_REVISION`
 as usual.
 
-Note: upstream's own `release.yml` also runs on `v*` tags. On this fork it fails
-at its "tag matches the manifest version" check for 4-part tags and publishes
-nothing (its store deploy jobs are disabled unless the `DEPLOY_*` variables are
-set). Only the **Firefox Release** run matters here.
+Note: upstream's own `release.yml` also runs when you push a `v*` tag with git.
+On this fork it fails at its "tag matches the manifest version" check for
+4-part tags and publishes nothing (its store deploy jobs are disabled unless the
+`DEPLOY_*` variables are set). Only the **Firefox Release** run matters here.
+Releasing with **Run workflow** does not start it.

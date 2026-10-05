@@ -5,12 +5,16 @@ name: Firefox Release (unlisted, self-distributed)
 # polls updates.json through gecko.update_url (releases/latest/download/...),
 # so installed copies update themselves. See FIREFOX.md.
 #
-# Only 4-part tags (vX.Y.Z.N): the 4th part is FIREFOX_REVISION. Upstream's
-# 3-part tags are not Firefox releases.
+# Two ways to start it:
+# - Actions tab -> Firefox Release -> Run workflow (on develop): the tag
+#   vX.Y.Z.N is computed from the build and created together with the release.
+# - pushing a 4-part tag vX.Y.Z.N (the 4th part is FIREFOX_REVISION). Upstream's
+#   3-part tags are not Firefox releases.
 on:
   push:
     tags:
       - 'v*.*.*.*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,7 +24,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      TAG: ${{ github.ref_name }}
       GECKO_ID: transmission-easy-client@lordvandal
 
     steps:
@@ -36,18 +39,36 @@ jobs:
           cache: 'npm'
 
       # Fail before installing anything: the transform has no dependencies, so
-      # the version the build WILL produce can be computed right away.
-      - name: Check the tag against the Firefox version
+      # the version the build WILL produce can be computed right away. Also
+      # refuses a version that was already released: Mozilla signs each version
+      # only once, so that run could never succeed.
+      - name: Determine and check the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           expected=$(node -p "
             const t = require('./builder/transformManifest');
             const rev = require('fs').readFileSync('FIREFOX_REVISION', 'utf8').trim();
             t(require('./src/manifest.json'), 'firefox', { firefoxRevision: rev }).version
           ")
-          if [ "${TAG#v}" != "$expected" ]; then
-            echo "::error::tag $TAG does not match the Firefox version $expected (src/manifest.json + FIREFOX_REVISION)"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+            if [ "${TAG#v}" != "$expected" ]; then
+              echo "::error::tag $TAG does not match the Firefox version $expected (src/manifest.json + FIREFOX_REVISION)"
+              exit 1
+            fi
+          else
+            TAG="v$expected"
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+              echo "::error::tag $TAG already exists: bump FIREFOX_REVISION before releasing again"
+              exit 1
+            fi
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists: bump FIREFOX_REVISION before releasing again"
             exit 1
           fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: npm ci
@@ -112,7 +133,7 @@ jobs:
       # Format: https://extensionworkshop.com/documentation/manage/updating-your-extension/
       - name: Generate updates.json
         env:
-          UPDATE_LINK: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.XPI }}
+          UPDATE_LINK: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ env.TAG }}/${{ env.XPI }}
         run: |
           node -e "
             const updates = {
@@ -129,14 +150,20 @@ jobs:
           cat updates.json
 
       # Not a prerelease and marked latest, so releases/latest/download/updates.json
-      # (the manifest's update_url) resolves to this release
+      # (the manifest's update_url) resolves to this release. On a manual run the
+      # tag does not exist yet and is created at the commit that was built.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            target=(--verify-tag)
+          else
+            target=(--target "$GITHUB_SHA")
+          fi
           gh release create "$TAG" "$XPI" updates.json \
             --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
+            "${target[@]}" \
             --latest \
             --title "Transmission Easy Client for Firefox $VERSION" \
             --notes "Signed Firefox add-on (self-distributed). Drag $XPI into Firefox to install; installed copies update automatically. See FIREFOX.md."
