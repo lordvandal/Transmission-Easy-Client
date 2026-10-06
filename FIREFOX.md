@@ -116,8 +116,60 @@ The built extension is in `dist/firefox/src` (not `dist`).
 
 ## Sync with upstream
 
+### Automatically (Upstream Sync workflow)
+
+`.github/workflows/upstream-sync.yml` runs every day at 04:17 UTC. You can also
+start it from **Actions** → **Upstream Sync** → **Run workflow**. Each run:
+
+1. merges `mthcore/Transmission-Easy-Client` `develop` into this fork's `develop`
+   (if there is nothing new, it stops here)
+2. sets the Firefox version:
+   - upstream version changed (e.g. `3.5.0` → `3.6.0`): `FIREFOX_REVISION` goes back to `1`
+   - same upstream version, but the add-on's code changed: `FIREFOX_REVISION` goes up by 1
+   - only docs or CI files changed: no change and no release
+3. runs type-check, tests, `build:firefox` and `web-ext lint`, and pushes to
+   `develop` only if they all pass
+4. starts **Firefox Release**, which signs and publishes the new version.
+   Installed copies then update themselves.
+
+One-time setup: create the `SYNC_TOKEN` secret. Upstream sometimes changes
+files in `.github/workflows/`, and GitHub does not let the workflow's built-in
+token push such a merge.
+
+1. GitHub → your profile picture → **Settings** → **Developer settings** →
+   **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.
+2. Name it `upstream-sync`, pick an expiration (GitHub emails you before it
+   expires), set **Repository access** to *Only select repositories* →
+   `lordvandal/Transmission-Easy-Client`.
+3. Under **Repository permissions**, set **Contents** to *Read and write* and
+   **Workflows** to *Read and write*. Click **Generate token** and copy it.
+4. In this repository: **Settings** → **Secrets and variables** → **Actions** →
+   **New repository secret**, name `SYNC_TOKEN`, paste the token, **Add secret**.
+
+Without the secret, syncs that don't touch upstream's workflow files still
+work; the others fail at the push step.
+
+To sync without releasing automatically, add a repository **variable** (same
+page, *Variables* tab) named `AUTO_RELEASE` with the value `false`. Then
+release yourself with **Run workflow** as described above.
+
+When it needs you:
+
+- **Merge conflict**: upstream changed the same lines as this fork (most
+  likely in `builder/transformManifest.js` or its test). The run fails, GitHub
+  emails you, and nothing is pushed. The log names the files. Resolve it
+  with git, or ask for help with those files.
+- **Checks fail** after the merge: nothing is pushed, and the run retries
+  every day. It succeeds once upstream fixes the problem.
+- GitHub turns off scheduled workflows in a repository with no activity for
+  60 days. If that happens, **Actions** shows a banner with a button to
+  re-enable it.
+
+### By hand
+
 From the website: on the repository's main page (branch `develop`), click
-**Sync fork** → **Update branch**.
+**Sync fork** → **Update branch**. Then set `FIREFOX_REVISION` yourself (rules
+below) and release with **Run workflow**.
 
 With git:
 
