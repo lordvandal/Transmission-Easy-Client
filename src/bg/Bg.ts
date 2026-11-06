@@ -66,6 +66,12 @@ class Bg {
     chrome.alarms.onAlarm.addListener(this.handleAlarm);
     // Clicking a notification used to do nothing at all
     chrome.notifications.onClicked.addListener(this.handleNotificationClick);
+    // Nothing else wakes the worker when the browser starts. Alarms are not
+    // guaranteed to survive a browser restart, and without this the background
+    // poll (badge, completion notifications) waited for the popup to be opened.
+    // The listener is empty on purpose: waking the worker runs init(), whose
+    // daemon autorun recreates the alarm.
+    chrome.runtime.onStartup.addListener(() => {});
     this.daemon = new Daemon(this);
     this.contextMenu = new ContextMenu(this);
 
@@ -166,7 +172,9 @@ class Bg {
         ];
 
         if (dep.length) {
-          this.contextMenu?.create();
+          this.contextMenu?.create().catch((err) => {
+            autorunLogger.error('contextMenu', 'create error', err);
+          });
         }
       });
     }));
@@ -420,12 +428,19 @@ class Bg {
     // The popup can't be opened programmatically on every browser, so fall
     // back to the extension page in a tab
     const openPage = () => chrome.tabs.create({ url: '/index.html' });
-    const action = chrome.action as typeof chrome.action & {
-      openPopup?: () => Promise<void>;
-    };
-    if (typeof action.openPopup === 'function') {
-      Promise.resolve(action.openPopup()).catch(openPage);
-    } else {
+    const action = chrome.action as Partial<Pick<typeof chrome.action, 'openPopup'>>;
+    if (typeof action.openPopup !== 'function') {
+      openPage();
+      return;
+    }
+    // Callback form, not Promise.resolve(openPopup()).catch(): Firefox's
+    // chrome.* returns undefined, so the refusal arrived through lastError and
+    // the fallback never ran — clicking a notification did nothing there
+    try {
+      action.openPopup(() => {
+        if (chrome.runtime.lastError) openPage();
+      });
+    } catch {
       openPage();
     }
   };
